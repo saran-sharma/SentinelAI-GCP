@@ -1,0 +1,135 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+  workflow_dispatch:
+    inputs:
+      plan_only:
+        description: "Plan without applying"
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false # never abandon a half-finished apply
+
+permissions:
+  contents: read
+  id-token: write # required to mint the OIDC token for WIF
+
+env:
+  PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+  REGION: ${{ vars.GCP_REGION || 'us-central1' }}
+  REPOSITORY: sentinelai
+  IMAGE_NAME: sentinelai-triage
+
+jobs:
+  deploy:
+    name: Build, push, apply
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      # Keyless. No service account JSON key exists for this project, so
+      # there is nothing to leak, rotate, or accidentally commit.
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - name: Resolve image tag
+        id: image
+        run: |
+          # Tag by commit SHA, never :latest — the running revision must be
+          # traceable to an exact commit, and rollback is just re-applying an
+          # older tag.
+          BASE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/${IMAGE_NAME}"
+          echo "uri=${BASE}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Build image
+        run: |
+          docker build \
+            --build-arg BUILDKIT_INLINE_CACHE=1 \
+            -t "${{ steps.image.outputs.uri }}" \
+            -t "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/${IMAGE_NAME}:latest" \
+            .
+
+      - name: Push image
+        run: |
+          docker push "${{ steps.image.outputs.uri }}"
+          docker push "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/${IMAGE_NAME}:latest"
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.10.5"
+
+      - name: Terraform init
+        working-directory: terraform
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${PROJECT_ID}-tfstate"
+
+      - name: Terraform plan
+        working-directory: terraform
+        env:
+          TF_VAR_slack_webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          terraform plan -input=false -out=tfplan \
+            -var="project_id=${PROJECT_ID}" \
+            -var="region=${REGION}" \
+            -var="environment=prod" \
+            -var="container_image=${{ steps.image.outputs.uri }}" \
+            -var="github_repository=${GITHUB_REPOSITORY}" \
+            -var="alert_email=${{ vars.ALERT_EMAIL }}"
+
+      - name: Terraform apply
+        if: ${{ inputs.plan_only != true }}
+        working-directory: terraform
+        run: terraform apply -input=false -auto-approve tfplan
+
+      - name: Smoke test the deployed revision
+        if: ${{ inputs.plan_only != true }}
+        working-directory: terraform
+        run: |
+          set -euo pipefail
+          URL="$(terraform output -raw service_url)"
+          TOKEN="$(gcloud auth print-identity-token)"
+
+          # A deploy that cannot triage a signal is a failed deploy, even if
+          # the revision reports READY.
+          RESPONSE="$(curl -sS -f -X POST "${URL}/v1/analyze" \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d '{"service":"ci-smoke","severity":"ERROR","text":"CI smoke test: synthetic connection failure"}')"
+
+          echo "$RESPONSE"
+          echo "$RESPONSE" | grep -q '"fingerprint"' || {
+            echo "::error::smoke test did not return a triage verdict"
+            exit 1
+          }
+
+      - name: Roll back on smoke-test failure
+        if: failure() && inputs.plan_only != true
+        run: |
+          echo "::warning::Deploy failed after apply — routing traffic to the previous ready revision."
+          PREVIOUS="$(gcloud run revisions list \
+            --service="${IMAGE_NAME}" --region="${REGION}" \
+            --filter="status.conditions.type=Ready AND status.conditions.status=True" \
+            --sort-by="~metadata.creationTimestamp" \
+            --format="value(metadata.name)" --limit=2 | tail -n1)"
+          if [ -n "${PREVIOUS}" ]; then
+            gcloud run services update-traffic "${IMAGE_NAME}" \
+              --region="${REGION}" --to-revisions="${PREVIOUS}=100"
+          fi

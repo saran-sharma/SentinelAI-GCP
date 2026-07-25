@@ -1,0 +1,27 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored.
+
+project_id  = "my-gcp-project-id"
+region      = "us-central1"
+environment = "dev"
+
+# Keyless CI. Must match the repo exactly (case-sensitive).
+github_repository = "your-github-user/GCP-Project"
+
+# Receives platform-health alerts. Leave empty for dashboard-only.
+alert_email = "you@example.com"
+
+# Slack incoming webhook — goes into Secret Manager, never into the image.
+# Prefer passing this via TF_VAR_slack_webhook_url instead of committing it.
+# slack_webhook_url = "https://hooks.slack.com/services/..."
+
+# --- Cost knobs -------------------------------------------------------------
+min_instances = 0 # 0 keeps you in the free tier; 1 removes cold starts (~$9/mo)
+max_instances = 5 # hard ceiling on spend during an alert storm
+
+suppression_window_minutes = 30
+notify_min_severity        = "SEV3"
+
+# --- Optional: billing budget as a triage source ----------------------------
+# enable_budget_guard   = true
+# billing_account_id    = "01ABCD-2345EF-6789GH"
+# monthly_budget_amount = 10

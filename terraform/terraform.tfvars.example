@@ -1,11 +1,11 @@
 # Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored.
 
-project_id  = "my-gcp-project-id"
+project_id  = "sentinelai-gcp"
 region      = "us-central1"
 environment = "dev"
 
 # Keyless CI. Must match the repo exactly (case-sensitive).
-github_repository = "your-github-user/GCP-Project"
+github_repository = "saran-sharma/SentinelAI-GCP"
 
 # Receives platform-health alerts. Leave empty for dashboard-only.
 alert_email = "you@example.com"

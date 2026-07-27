@@ -115,18 +115,22 @@ module "cloud_run" {
   artifacts_bucket           = module.storage.bucket_name
   slack_secret_id            = module.secrets.slack_secret_id
 
-  # Application-level allowlist mirroring the IAM invoker bindings.
-  allowed_invoker_sas = join(",", [
-    module.iam.pubsub_invoker_email,
-    module.iam.scheduler_sa_email,
-    module.iam.deployer_sa_email,
-  ])
+  # Per-endpoint pinning for the two machine entrypoints.
+  pubsub_invoker_sa = module.iam.pubsub_invoker_email
+  scheduler_sa      = module.iam.scheduler_sa_email
 
-  invoker_members = [
-    module.iam.pubsub_invoker_member,
-    module.iam.scheduler_sa_member,
-    "serviceAccount:${module.iam.deployer_sa_email}",
-  ]
+  # roles/run.invoker. The operator entries are what make `make smoke` and
+  # `make demo` work: the service is private, so a human with no invoker
+  # binding cannot reach it at all. Project Owners inherit run.invoker, but
+  # anyone operating this without Owner needs an explicit grant here.
+  invoker_members = concat(
+    [
+      module.iam.pubsub_invoker_member,
+      module.iam.scheduler_sa_member,
+      "serviceAccount:${module.iam.deployer_sa_email}",
+    ],
+    var.operator_members,
+  )
 
   depends_on = [
     module.project_services,

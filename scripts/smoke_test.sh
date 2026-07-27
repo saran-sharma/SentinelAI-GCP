@@ -42,6 +42,27 @@ triage() {
 
 echo "==> Target: ${URL}"
 
+# `terraform apply` deploys var.container_image, which defaults to Google's
+# sample "hello" container so the very first apply succeeds before any image
+# exists. That container 404s on every path except "/", which looks exactly
+# like a broken application. Catch it here rather than letting it waste an hour.
+RUNNING_IMAGE="$(gcloud run services describe sentinelai-triage \
+  --project="${PROJECT_ID}" --region="${REGION}" \
+  --format='value(spec.template.spec.containers[0].image)' 2>/dev/null || true)"
+
+case "${RUNNING_IMAGE}" in
+*cloudrun/container/hello*)
+  echo
+  echo "  FAIL  The service is still running the placeholder image:"
+  echo "          ${RUNNING_IMAGE}"
+  echo "        That image returns 404 for /healthz and every other path."
+  echo "        Build and deploy the real image:"
+  echo "          make deploy PROJECT_ID=${PROJECT_ID}"
+  exit 1
+  ;;
+esac
+echo "==> Image:  ${RUNNING_IMAGE:-unknown}"
+
 echo "==> Health"
 check "liveness" curl -sS -f "${URL}/healthz" -H "Authorization: Bearer ${TOKEN}"
 check "readiness (Firestore reachable)" curl -sS -f "${URL}/readyz" -H "Authorization: Bearer ${TOKEN}"

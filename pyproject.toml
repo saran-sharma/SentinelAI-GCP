@@ -18,7 +18,7 @@ select = ["E", "F", "I", "B", "UP", "S", "C4", "SIM", "RET"]
 ignore = ["S101", "B008", "RET504"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S105", "S106"]
+"tests/*" = ["S105", "S106", "S107"]
 
 [tool.coverage.run]
 source = ["app"]

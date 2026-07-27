@@ -195,16 +195,46 @@ service to triage its own outage — precisely when it cannot. Likewise, the
 
 ---
 
-## ADR-010 · Two-layer authorisation
+## ADR-010 · Two-layer authorisation, scoped per endpoint
 
-Cloud Run IAM (`roles/run.invoker`, no `allUsers`) is the primary gate and rejects
-unauthorised callers before the container starts. The application *also* verifies
-the OIDC token and checks the caller email against `SENTINEL_ALLOWED_INVOKER_SAS`.
+Cloud Run IAM (`roles/run.invoker`, no `allUsers`) is the primary gate. It
+validates the OIDC token's signature **and its audience against the service URL**
+before the request reaches the container.
 
-The second layer is not redundant. IAM answers "may this identity call the
-service?"; the app answers "is this the specific identity that should be calling
-*this endpoint*?". A future change that widens the IAM binding — a teammate adding
-a debugging identity — does not silently widen the trust boundary.
+The application adds a second, narrower check: is this the *specific* identity
+that should be calling *this endpoint*? That is a question IAM cannot answer.
+
+| Endpoint | Allowed caller | Rationale |
+|---|---|---|
+| `/v1/events/pubsub` | Pub/Sub invoker SA only | Nothing else should inject events |
+| `/jobs/digest` | Cloud Scheduler SA only | Nothing else should trigger the job |
+| `/v1/analyze`, `/v1/incidents` | any IAM-authorised identity | Operator-facing by design |
+| `/healthz`, `/readyz` | unauthenticated | Probes run before IAM in the request path |
+
+**This was originally wrong, and the mistake is instructive.** The first version
+pinned *every* endpoint to the same list of three service accounts. The result:
+the service deployed cleanly, Cloud Run reported it healthy, probes passed — and
+every operator command failed. `make smoke` and `make demo` authenticate the
+human via `gcloud auth print-identity-token`, and that identity was on no list,
+so the allowlist rejected it with 403 after Cloud Run had already let it through.
+
+Two lessons worth keeping:
+
+- **An allowlist that excludes the operator is a broken allowlist.** Defence in
+  depth that locks out legitimate use is not security, it is an outage.
+- **The audience must not be pinned in-app on Cloud Run.** The service cannot
+  reference its own URL at plan time, so `SENTINEL_EXPECTED_AUDIENCE` was never
+  set and the check silently passed on everything. A check that cannot be
+  configured correctly is worse than no check, because it reads as protection.
+  Cloud Run performs it authoritatively; the setting now exists solely for
+  deployments that are not behind Cloud Run.
+
+Note also that `gcloud auth print-identity-token` for a *user* account mints a
+token whose audience is gcloud's own OAuth client id
+(`32555940559.apps.googleusercontent.com`), not the service URL. Any design that
+requires a service-URL audience is therefore incompatible with a human operator
+holding a user credential — another reason the audience check belongs to the
+platform layer, not the application.
 
 ---
 

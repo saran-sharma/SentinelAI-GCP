@@ -267,10 +267,25 @@ export TF_VAR_slack_webhook_url="https://hooks.slack.com/services/..."
 
 ```bash
 terraform init -backend-config="bucket=sentinelai-gcp-tfstate"
-terraform apply                    # ~4 min; deploys with a placeholder image
+terraform apply                    # ~4 min
 
-# Build and deploy the real image
+# Build and deploy the real image — REQUIRED, see below
 cd .. && make deploy PROJECT_ID=sentinelai-gcp
+```
+
+> **The first `terraform apply` does not deploy this application.**
+> `container_image` defaults to Google's sample `cloudrun/container/hello` so the
+> initial apply can succeed before any image exists. That container serves `/`
+> and returns **404 for every other path, including `/healthz`** — a Ready
+> revision that 404s is this, not a broken app. `make deploy` replaces it.
+> `make smoke` checks for it explicitly and tells you.
+
+If you operate this without Project Owner, grant yourself invoker access — the
+service is private, so otherwise Cloud Run rejects you before the app is reached:
+
+```hcl
+# terraform.tfvars
+operator_members = ["user:you@example.com"]
 ```
 
 #### Container engine

@@ -11,7 +11,8 @@ variable "suppression_window_minutes" { type = number }
 variable "notify_min_severity" { type = string }
 variable "artifacts_bucket" { type = string }
 variable "slack_secret_id" { type = string }
-variable "allowed_invoker_sas" { type = string }
+variable "pubsub_invoker_sa" { type = string }
+variable "scheduler_sa" { type = string }
 variable "invoker_members" { type = list(string) }
 
 resource "google_cloud_run_v2_service" "triage" {
@@ -92,10 +93,23 @@ resource "google_cloud_run_v2_service" "triage" {
         name  = "SENTINEL_VERIFY_OIDC"
         value = "true"
       }
+      # Machine endpoints are pinned to one service account each. Operator
+      # endpoints deliberately have no allowlist — Cloud Run IAM already
+      # decides who may reach the service at all, and pinning them locked the
+      # human operator out of /v1/analyze and /v1/incidents entirely.
       env {
-        name  = "SENTINEL_ALLOWED_INVOKER_SAS"
-        value = var.allowed_invoker_sas
+        name  = "SENTINEL_PUBSUB_INVOKER_SA"
+        value = var.pubsub_invoker_sa
       }
+      env {
+        name  = "SENTINEL_SCHEDULER_SA"
+        value = var.scheduler_sa
+      }
+
+      # SENTINEL_EXPECTED_AUDIENCE is intentionally unset. Cloud Run validates
+      # the token audience against the service URL before forwarding, and the
+      # service cannot reference its own URL at plan time. Set it only when
+      # running this image somewhere other than Cloud Run.
 
       # Injected from Secret Manager at start-up. The value never appears in
       # the image, the Terraform plan output, or `gcloud run services describe`.

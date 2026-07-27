@@ -244,6 +244,98 @@ changing the spec is how dedup logic rots.
 
 ---
 
+## Troubleshooting deployment
+
+### Every path returns 404, but the revision is Ready
+
+The service is almost certainly still running the placeholder image. `var.container_image`
+defaults to `us-docker.pkg.dev/cloudrun/container/hello` so the first `terraform apply`
+succeeds before any image exists, and that container serves `/` only — every other
+path, including `/healthz`, returns 404.
+
+```bash
+gcloud run services describe "${SERVICE}" --region="${REGION}" \
+  --format='value(spec.template.spec.containers[0].image)'
+```
+
+If it contains `cloudrun/container/hello`, build and deploy the real image:
+
+```bash
+make deploy PROJECT_ID="${PROJECT_ID}"
+```
+
+`make smoke` now checks this first and fails with an explicit message.
+
+### 401 `invalid OIDC token`
+
+The response includes the underlying reason. Read it first:
+
+```bash
+gcloud logging read \
+  "resource.labels.service_name=\"${SERVICE}\" AND jsonPayload.message=\"oidc_verification_failed\"" \
+  --project="${PROJECT_ID}" --limit=5 --freshness=1h --format='value(jsonPayload.error)'
+```
+
+| Reason contains | Cause | Fix |
+|---|---|---|
+| `Token expired` | Identity tokens live ~1 hour | Re-run `gcloud auth print-identity-token` |
+| `Wrong number of segments` | An access token was sent, not an identity token | Use `print-identity-token`, not `print-access-token` |
+| `Token has wrong audience` | `SENTINEL_EXPECTED_AUDIENCE` is set on Cloud Run | Unset it — Cloud Run already validates the audience |
+| `Could not fetch certs` | No egress to `www.googleapis.com` | Check VPC egress / firewall |
+
+### 403 `caller ... is not permitted on /v1/events/pubsub`
+
+Correct behaviour: that endpoint is pinned to the Pub/Sub invoker service
+account. A human cannot post to it directly — use `/v1/analyze`, which is the
+operator-facing equivalent, or publish to the topic:
+
+```bash
+gcloud pubsub topics publish sentinelai-events --message='{"severity":"ERROR","textPayload":"test"}'
+```
+
+### 403 from Cloud Run before reaching the app
+
+The caller has no `roles/run.invoker`. Project Owners inherit it; anyone else
+needs an explicit grant:
+
+```hcl
+operator_members = ["user:you@example.com"]
+```
+
+### Container serves nothing locally — connection reset or empty reply
+
+`curl: (56) Recv failure` / `curl: (52) Empty reply from server` from the host
+means the TCP connection was accepted and then dropped. With rootless Podman the
+port forwarder accepts on the host before checking whether anything is listening
+inside the container, which produces exactly this. Check, in order:
+
+```bash
+# 1. Was the port published at all?
+podman ps --format '{{.Names}}\t{{.Ports}}'
+
+# 2. Is the app listening inside the container, on the right interface?
+podman exec -it <container> python -c "import socket;s=socket.socket();print(s.connect_ex(('127.0.0.1',8080)))"
+#    0 = listening. Anything else = the process is not up on that port.
+
+# 3. Did the process bind to 0.0.0.0, not 127.0.0.1?
+#    A process bound to 127.0.0.1 inside the container is unreachable from the host.
+podman exec -it <container> ss -ltnp 2>/dev/null || true
+```
+
+Run the image the way Cloud Run does, and curl the published port:
+
+```bash
+podman run --rm -p 8080:8080 -e PORT=8080 -e SENTINEL_VERIFY_OIDC=false \
+  us-central1-docker.pkg.dev/sentinelai-gcp/sentinelai/sentinelai-triage:$(git rev-parse --short HEAD)
+
+curl -i http://127.0.0.1:8080/healthz    # use 127.0.0.1, not localhost
+```
+
+Prefer `127.0.0.1` over `localhost`: the server binds IPv4 only, and `localhost`
+resolves to `::1` first on many images. That failure mode reports
+`curl: (7) Failed to connect`, which is distinct from the reset above — the two
+are different problems and worth telling apart.
+
 ## Manual operations
 
 ```bash

@@ -46,61 +46,15 @@ An 89% reduction in both AI spend and human interrupts.**
 
 ## Architecture
 
-```mermaid
-flowchart TB
-    subgraph producers["Signal producers"]
-        LOGS["Cloud Logging<br/>severity ≥ ERROR"]
-        MON["Cloud Monitoring<br/>alert policies"]
-        BUDGET["Cloud Billing<br/>budget thresholds"]
-    end
+<p align="center">
+  <img src="docs/images/architecture.svg" alt="SentinelAI architecture on Google Cloud" width="100%">
+</p>
 
-    SINK["Log Sink<br/><i>filtered at source</i>"]
-    TOPIC(["Pub/Sub<br/>sentinelai-events"])
-    DLQ(["Dead-letter topic<br/><i>5 failed attempts</i>"])
-
-    subgraph run["Cloud Run · private, scale-to-zero"]
-        API["FastAPI triage service"]
-        FP["Fingerprint<br/><i>normalise + hash</i>"]
-        GATE{"Seen inside<br/>suppression<br/>window?"}
-        AI["Vertex AI · Gemini 2.5 Flash<br/><i>structured output</i>"]
-        HEUR["Heuristic fallback<br/><i>if Vertex unavailable</i>"]
-    end
-
-    FS[("Firestore<br/>incidents<br/><i>doc id = fingerprint</i>")]
-    GCS[("Cloud Storage<br/>digests + postmortems")]
-    SM["Secret Manager<br/>Slack webhook"]
-    SLACK["Slack<br/><i>SEV1–SEV3 only</i>"]
-
-    SCHED["Cloud Scheduler<br/>daily 09:00"]
-    MET["Cloud Monitoring<br/>custom + log-based metrics"]
-
-    LOGS --> SINK --> TOPIC
-    MON -->|pubsub channel| TOPIC
-    BUDGET --> TOPIC
-    TOPIC -->|push + OIDC| API
-    TOPIC -.->|poison messages| DLQ
-
-    API --> FP --> GATE
-    GATE -->|"yes — increment only"| FS
-    GATE -->|no| AI
-    AI -.->|failure| HEUR
-    AI --> FS
-    HEUR --> FS
-    FS --> SLACK
-    SM -.-> SLACK
-
-    SCHED -->|OIDC| API
-    API --> GCS
-    API --> MET
-    MET -.->|self-monitoring alerts| MON
-
-    classDef ai fill:#4285F4,stroke:#1a73e8,color:#fff
-    classDef store fill:#34A853,stroke:#188038,color:#fff
-    classDef danger fill:#EA4335,stroke:#c5221f,color:#fff
-    class AI,HEUR ai
-    class FS,GCS,SM store
-    class DLQ danger
-```
+<p align="center">
+  <sub>Rendered from <a href="scripts/render_architecture.py"><code>scripts/render_architecture.py</code></a> —
+  diagram-as-code, so it can be reviewed in a pull request and cannot drift silently.
+  Regenerate with <code>make diagram</code>.</sub>
+</p>
 
 ### Request path, end to end
 
@@ -108,9 +62,10 @@ flowchart TB
 2. The **log sink** matches `severity>=ERROR` and publishes to Pub/Sub. Filtering
    happens at the sink, not in the app — signals that will never be actionable
    never cost a push delivery.
-3. **Pub/Sub push** delivers with an OIDC token. Cloud Run IAM validates it before
-   the container sees the request; the app re-validates and checks the caller
-   against an allowlist.
+3. **Pub/Sub push** delivers with an OIDC token. Cloud Run IAM validates its
+   signature, expiry and audience before the container sees the request; the app
+   then checks that this *particular* endpoint accepts this *particular* caller —
+   the push endpoint is pinned to the Pub/Sub service account alone.
 4. **Fingerprinting** normalises away the request id, pod suffix, IP and duration,
    then hashes what remains: `a3f8c21d9e4b7f60`.
 5. **Firestore lookup.** Seen 4 minutes ago? Atomic increment, publish a

@@ -47,14 +47,27 @@ class Settings(BaseSettings):
     notifications_enabled: bool = True
 
     # --- Security ---------------------------------------------------------
-    # Cloud Run IAM is the real gate; in-app OIDC verification is layer two.
+    # Cloud Run IAM is the real gate; in-app verification is layer two. See
+    # app/auth.py for why the audience is not pinned here by default.
     verify_oidc: bool = True
+
+    # Only set when running somewhere other than Cloud Run, which validates the
+    # audience against the service URL before forwarding the request.
     expected_audience: str = ""
-    allowed_invoker_sas: str = ""
+
+    # Machine endpoints are pinned to exactly one service account each. Operator
+    # endpoints (/v1/analyze, /v1/incidents) intentionally have no allowlist —
+    # Cloud Run IAM already decides who may call the service at all.
+    pubsub_invoker_sa: str = ""
+    scheduler_sa: str = ""
 
     @property
-    def allowed_invoker_list(self) -> list[str]:
-        return [s.strip() for s in self.allowed_invoker_sas.split(",") if s.strip()]
+    def pubsub_callers(self) -> list[str]:
+        return [s for s in (self.pubsub_invoker_sa.strip(),) if s]
+
+    @property
+    def scheduler_callers(self) -> list[str]:
+        return [s for s in (self.scheduler_sa.strip(),) if s]
 
 
 @lru_cache(maxsize=1)

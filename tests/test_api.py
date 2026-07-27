@@ -144,6 +144,49 @@ def test_auth_is_enforced_when_oidc_verification_is_on(client):
         app.state.container.settings.verify_oidc = False
 
 
+# --- caller pinning -------------------------------------------------------
+#
+# The machine endpoints must stay pinned to one service account each, while the
+# operator endpoints must stay open to any IAM-authorised identity. Getting this
+# backwards is what made `make smoke` and `make demo` impossible to run.
+
+
+def test_machine_endpoints_are_pinned_to_their_service_account(client, monkeypatch):
+    seen: dict[str, object] = {}
+
+    def capture(request, settings, *, allowed_callers=None):
+        seen[request.url.path] = allowed_callers
+        return "caller@example.com"
+
+    monkeypatch.setattr("app.main.verify_oidc_token", capture)
+    settings = app.state.container.settings
+    settings.pubsub_invoker_sa = "pubsub@p.iam.gserviceaccount.com"
+    settings.scheduler_sa = "sched@p.iam.gserviceaccount.com"
+
+    client.post("/v1/events/pubsub", json=push_body(LOG_ENTRY))
+    client.post("/jobs/digest")
+
+    assert seen["/v1/events/pubsub"] == ["pubsub@p.iam.gserviceaccount.com"]
+    assert seen["/jobs/digest"] == ["sched@p.iam.gserviceaccount.com"]
+
+
+def test_operator_endpoints_accept_any_authorised_identity(client, monkeypatch):
+    seen: dict[str, object] = {}
+
+    def capture(request, settings, *, allowed_callers=None):
+        seen[request.url.path] = allowed_callers
+        return "human@example.com"
+
+    monkeypatch.setattr("app.main.verify_oidc_token", capture)
+
+    client.post("/v1/analyze", json={"service": "s", "text": "boom"})
+    client.get("/v1/incidents")
+
+    # None, not a service-account list — a human operator must be able to call these.
+    assert seen["/v1/analyze"] is None
+    assert seen["/v1/incidents"] is None
+
+
 # --- digest aggregation ---------------------------------------------------
 
 

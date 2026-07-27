@@ -137,6 +137,21 @@ variable "monthly_budget_amount" {
   default     = 10
 }
 
+variable "operator_members" {
+  description = <<-EOT
+    IAM members granted roles/run.invoker so a human can run `make smoke` and
+    `make demo` against the private service, e.g. ["user:you@example.com"].
+    Project Owners already inherit run.invoker and do not need listing here.
+  EOT
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for m in var.operator_members : can(regex("^(user|group|serviceAccount|domain):", m))])
+    error_message = "Each operator_members entry must be a fully-qualified IAM member, e.g. user:you@example.com."
+  }
+}
+
 variable "alert_email" {
   description = "Address that receives platform-health alerts (AI degraded, DLQ backlog, service 5xx). Empty means dashboard-only."
   type        = string

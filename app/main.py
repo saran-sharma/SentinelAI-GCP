@@ -147,7 +147,8 @@ async def pubsub_push(
     a poison message until the dead-letter policy fires, burning quota and
     Gemini spend on something that can never succeed.
     """
-    verify_oidc_token(request, settings)
+    # Pinned: only the Pub/Sub push identity may inject events.
+    verify_oidc_token(request, settings, allowed_callers=settings.pubsub_callers)
 
     try:
         body = await request.json()
@@ -178,7 +179,12 @@ async def analyze(
     c: Container = Depends(container),
     settings: Settings = Depends(settings_dep),
 ) -> Response:
-    """Triage a raw signal directly. Used by the demo script and for backfills."""
+    """Triage a raw signal directly. Used by the demo script and for backfills.
+
+    Operator-facing: any identity Cloud Run IAM has already authorised may call
+    this. Pinning it to service accounts would lock out the human running
+    `make smoke` / `make demo`, which is the entire point of the endpoint.
+    """
     verify_oidc_token(request, settings)
     body: dict[str, Any] = await request.json()
 
@@ -230,5 +236,6 @@ async def run_digest(
     c: Container = Depends(container),
     settings: Settings = Depends(settings_dep),
 ) -> Response:
-    verify_oidc_token(request, settings)
+    # Pinned: only Cloud Scheduler may trigger the digest.
+    verify_oidc_token(request, settings, allowed_callers=settings.scheduler_callers)
     return JSONResponse(c.digest.run(window_hours=max(1, min(window_hours, 168))))

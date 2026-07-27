@@ -95,11 +95,16 @@ expect "liveness" GET /healthz 200
 expect "readiness (Firestore reachable)" GET /readyz 200
 
 echo "==> Authentication"
-# Unauthenticated calls must be rejected by Cloud Run IAM before reaching the app.
+# Unauthenticated calls must be rejected by Cloud Run IAM before reaching the
+# app. The GFE may answer 401, 403 or 404 depending on how the credential is
+# malformed — 404 is deliberate, so a private service cannot be enumerated by
+# probing paths. All three prove the same thing: the request died upstream of
+# the container. Only a 2xx here would be a real finding.
 CODE="$(curl -sS -o /dev/null -w '%{http_code}' "${URL}/v1/incidents" || true)"
 case "${CODE}" in
-401 | 403) pass "unauthenticated request rejected (HTTP ${CODE})" ;;
-*) fail "endpoint is publicly reachable (HTTP ${CODE})" ;;
+401 | 403 | 404) pass "unauthenticated request rejected at the GFE (HTTP ${CODE})" ;;
+2*) fail "endpoint is publicly reachable (HTTP ${CODE}) — check the invoker IAM policy" ;;
+*) fail "unexpected response to an unauthenticated request (HTTP ${CODE})" ;;
 esac
 
 echo "==> Triage"

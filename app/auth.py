@@ -3,12 +3,16 @@
 Two layers, with a clear division of responsibility:
 
 1.  **Cloud Run IAM** (`roles/run.invoker`, no `allUsers`) is the primary gate.
-    It validates the OIDC token's signature *and its audience against the
-    service URL* before the request ever reaches this process. That is why this
-    module does not pin the audience itself: re-deriving our own URL in-app
-    would be guesswork, and Cloud Run has already done it authoritatively.
-    `expected_audience` remains available for deployments that are not behind
-    Cloud Run, where nothing else performs that check.
+    It validates the token's signature, expiry and audience against the service
+    URL before the request ever reaches this process. An unauthenticated call
+    is rejected at the front end and never arrives here at all.
+
+    Because of that, this module does not re-verify the signature by default —
+    see `_decode_platform_verified`. Doing so bought no security and actively
+    broke the service: valid, Cloud Run-approved operator tokens were rejected
+    with "Could not verify token signature" while the platform considered the
+    caller fully authorised. Set `SENTINEL_VERIFY_TOKEN_SIGNATURE=true` when
+    deploying without an authenticating proxy in front.
 
 2.  **This module** answers a narrower question that IAM cannot: is this the
     *specific* identity that should be calling *this endpoint*? The machine
@@ -25,8 +29,11 @@ the operator's own identity was never on the list.
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
 from collections.abc import Sequence
+from typing import Any
 
 from fastapi import HTTPException, Request, status
 
@@ -56,13 +63,8 @@ def verify_oidc_token(
     token = header.split(" ", 1)[1].strip()
 
     try:
-        from google.auth.transport import requests as google_requests
-        from google.oauth2 import id_token
-
-        claims = id_token.verify_oauth2_token(
-            token,
-            google_requests.Request(),
-            audience=settings.expected_audience or None,
+        claims = (
+            _verify_signature(token, settings) if settings.verify_token_signature else _decode_platform_verified(token)
         )
     except Exception as exc:  # noqa: BLE001
         # The reason is echoed to the caller on purpose. This service is private
@@ -88,3 +90,58 @@ def verify_oidc_token(
         )
 
     return email
+
+
+_GOOGLE_ISSUERS = frozenset({"accounts.google.com", "https://accounts.google.com"})
+
+
+def _decode_platform_verified(token: str) -> dict[str, Any]:
+    """Read the claims of a token the platform has already verified.
+
+    Cloud Run validates the signature, the expiry and the audience against the
+    service URL before forwarding the request. A request cannot reach this
+    process without having passed that check — an unauthenticated call is
+    rejected at the front end and never arrives. Re-verifying the signature
+    here therefore adds no security, and it does add:
+
+      - a synchronous network call to googleapis.com on every request,
+      - a dependency that can fail for reasons unrelated to the caller's
+        legitimacy, turning a valid request into a 401.
+
+    That is not hypothetical. Verification was rejecting genuine, Cloud
+    Run-approved operator tokens with "Could not verify token signature",
+    making the service unusable while the platform considered the caller fully
+    authorised.
+
+    So: trust the platform's verification, read the claims, and use them only
+    to decide which endpoint this already-authorised identity may call. The
+    issuer is still checked, cheaply, to catch a grossly malformed token.
+
+    Set SENTINEL_VERIFY_TOKEN_SIGNATURE=true when running anywhere that does
+    NOT authenticate in front of the app — there, this would be unsafe.
+    """
+    parts = token.split(".")
+    if len(parts) != 3:
+        raise ValueError(f"not a JWT: expected 3 segments, got {len(parts)}")
+
+    payload = parts[1]
+    payload += "=" * ((4 - len(payload) % 4) % 4)
+    claims: dict[str, Any] = json.loads(base64.urlsafe_b64decode(payload))
+
+    issuer = str(claims.get("iss", ""))
+    if issuer not in _GOOGLE_ISSUERS:
+        raise ValueError(f"unexpected issuer {issuer!r}")
+
+    return claims
+
+
+def _verify_signature(token: str, settings: Settings) -> dict[str, Any]:
+    """Full offline-unsafe verification, for deployments with no auth in front."""
+    from google.auth.transport import requests as google_requests
+    from google.oauth2 import id_token
+
+    return id_token.verify_oauth2_token(
+        token,
+        google_requests.Request(),
+        audience=settings.expected_audience or None,
+    )

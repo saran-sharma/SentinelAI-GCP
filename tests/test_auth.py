@@ -44,7 +44,11 @@ def claims(monkeypatch):
 
 @pytest.fixture
 def settings() -> Settings:
-    return Settings(verify_oidc=True, pubsub_invoker_sa="pubsub@p.iam.gserviceaccount.com")
+    return Settings(
+        verify_oidc=True,
+        verify_token_signature=True,
+        pubsub_invoker_sa="pubsub@p.iam.gserviceaccount.com",
+    )
 
 
 def test_disabled_verification_short_circuits():
@@ -109,3 +113,88 @@ def test_empty_allowlist_does_not_lock_everyone_out(settings, claims):
     """An unset SENTINEL_*_SA must not silently reject every caller."""
     assert verify_oidc_token(make_request(), settings, allowed_callers=[]) == "human@example.com"
     assert verify_oidc_token(make_request(), settings, allowed_callers=[""]) == "human@example.com"
+
+
+# --- platform-verified path (the default on Cloud Run) --------------------
+
+
+def make_token(claims: dict) -> str:
+    import base64
+    import json
+
+    def seg(data: dict) -> str:
+        return base64.urlsafe_b64encode(json.dumps(data).encode()).decode().rstrip("=")
+
+    return f"{seg({'alg': 'RS256'})}.{seg(claims)}.not-a-real-signature"
+
+
+@pytest.fixture
+def platform_settings() -> Settings:
+    """Cloud Run's posture: the platform verified the token, we read the claims."""
+    return Settings(
+        verify_oidc=True,
+        verify_token_signature=False,
+        pubsub_invoker_sa="pubsub@p.iam.gserviceaccount.com",
+    )
+
+
+def test_platform_verified_token_is_accepted_without_a_signature_check(platform_settings):
+    """Cloud Run already checked the signature; an unsigned-looking token from
+    it must not be rejected, which is what broke the deployed service."""
+    token = make_token(
+        {
+            "iss": "https://accounts.google.com",
+            "email": "human@example.com",
+            "email_verified": True,
+            "aud": "32555940559.apps.googleusercontent.com",
+        }
+    )
+
+    caller = verify_oidc_token(make_request(token=token), platform_settings)
+
+    assert caller == "human@example.com"
+
+
+def test_platform_path_still_enforces_the_endpoint_allowlist(platform_settings):
+    token = make_token({"iss": "https://accounts.google.com", "email": "human@example.com", "email_verified": True})
+
+    with pytest.raises(HTTPException) as exc:
+        verify_oidc_token(
+            make_request("/v1/events/pubsub", token=token),
+            platform_settings,
+            allowed_callers=platform_settings.pubsub_callers,
+        )
+
+    assert exc.value.status_code == 403
+
+
+def test_platform_path_rejects_a_non_google_issuer(platform_settings):
+    token = make_token({"iss": "https://evil.example.com", "email": "a@b.com", "email_verified": True})
+
+    with pytest.raises(HTTPException) as exc:
+        verify_oidc_token(make_request(token=token), platform_settings)
+
+    assert exc.value.status_code == 401
+    assert "issuer" in exc.value.detail
+
+
+def test_platform_path_rejects_a_non_jwt(platform_settings):
+    with pytest.raises(HTTPException) as exc:
+        verify_oidc_token(make_request(token="not-a-jwt"), platform_settings)
+
+    assert exc.value.status_code == 401
+    assert "3 segments" in exc.value.detail
+
+
+def test_platform_path_makes_no_network_call(platform_settings, monkeypatch):
+    """The old path fetched Google's certs on every request. That is a latency
+    cost and a failure mode; it must not happen on the default path."""
+    from google.oauth2 import id_token
+
+    def explode(*_args, **_kwargs):
+        raise AssertionError("verify_oauth2_token must not be called")
+
+    monkeypatch.setattr(id_token, "verify_oauth2_token", explode)
+    token = make_token({"iss": "https://accounts.google.com", "email": "human@example.com", "email_verified": True})
+
+    assert verify_oidc_token(make_request(token=token), platform_settings) == "human@example.com"

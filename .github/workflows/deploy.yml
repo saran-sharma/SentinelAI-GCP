@@ -58,10 +58,11 @@ jobs:
           BASE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/${IMAGE_NAME}"
           echo "uri=${BASE}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
 
+      # CI builds with Docker because that is what GitHub-hosted runners ship
+      # with. The Dockerfile is plain OCI, so local Podman builds are identical.
       - name: Build image
         run: |
           docker build \
-            --build-arg BUILDKIT_INLINE_CACHE=1 \
             -t "${{ steps.image.outputs.uri }}" \
             -t "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/${IMAGE_NAME}:latest" \
             .

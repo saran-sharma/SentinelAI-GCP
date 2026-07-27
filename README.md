@@ -195,7 +195,8 @@ flowchart TB
 ### Prerequisites
 
 - A GCP project with billing enabled (free tier is sufficient)
-- `gcloud`, `terraform >= 1.6`, `docker`, Python 3.12
+- `gcloud`, `terraform >= 1.6`, Python 3.12
+- **Podman** (default) or Docker — see below
 
 ### 1 · Bootstrap
 
@@ -227,6 +228,30 @@ terraform apply                    # ~4 min; deploys with a placeholder image
 # Build and deploy the real image
 cd .. && make deploy PROJECT_ID=YOUR_PROJECT_ID
 ```
+
+#### Container engine
+
+Image builds default to **Podman**, which needs no daemon and no root — usually
+the reason a managed corporate machine disallows Docker. The `Dockerfile` is
+plain OCI, so both engines produce the same image:
+
+```bash
+make build                         # Podman (default)
+make build ENGINE=docker           # Docker, if you prefer it
+```
+
+One difference worth knowing: `gcloud auth configure-docker` installs a
+credential helper that Podman does not invoke. `make push` therefore runs
+`make login`, which authenticates both engines with a short-lived OAuth access
+token instead:
+
+```bash
+gcloud auth print-access-token \
+  | podman login -u oauth2accesstoken --password-stdin https://us-central1-docker.pkg.dev
+```
+
+CI builds with Docker, because that is what GitHub-hosted runners ship with —
+the image is identical either way.
 
 ### 4 · Verify
 

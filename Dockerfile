@@ -1,4 +1,6 @@
-# syntax=docker/dockerfile:1
+# Plain OCI — no BuildKit-specific syntax, so `podman build` and `docker build`
+# produce the same image. Local builds default to Podman (see the Makefile); CI
+# uses Docker because that is what GitHub-hosted runners ship with.
 #
 # Multi-stage: wheels are built in the builder, so the runtime image carries no
 # compiler toolchain and nothing writable that the app doesn't need. The final

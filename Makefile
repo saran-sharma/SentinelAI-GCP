@@ -105,6 +105,10 @@ deploy: push ## Build, push and apply with the new image
 smoke: ## Run post-deploy smoke tests
 	./scripts/smoke_test.sh $(PROJECT_ID) $(REGION)
 
+.PHONY: diagnose
+diagnose: ## Dump full deployment evidence (run this when smoke fails)
+	./scripts/diagnose.sh $(PROJECT_ID) $(REGION)
+
 .PHONY: demo
 demo: ## Publish a realistic incident burst and show the triage result
 	./scripts/simulate_incident.sh $(PROJECT_ID)

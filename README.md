@@ -5,8 +5,8 @@
 > and uses **Vertex AI (Gemini)** to produce a severity, a probable root cause and a
 > runnable remediation plan — before a human is ever paged.
 
-[![CI](https://github.com/OWNER/GCP-Project/actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
-[![Deploy](https://github.com/OWNER/GCP-Project/actions/workflows/deploy.yml/badge.svg)](../../actions/workflows/deploy.yml)
+[![CI](https://github.com/saran-sharma/SentinelAI-GCP/actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
+[![Deploy](https://github.com/saran-sharma/SentinelAI-GCP/actions/workflows/deploy.yml/badge.svg)](../../actions/workflows/deploy.yml)
 [![Terraform](https://img.shields.io/badge/IaC-Terraform-7B42BC)](terraform/)
 [![Python](https://img.shields.io/badge/python-3.12-3776AB)](app/)
 
@@ -194,18 +194,53 @@ flowchart TB
 
 ### Prerequisites
 
-- A GCP project with billing enabled (free tier is sufficient)
-- `gcloud`, `terraform >= 1.6`, Python 3.12
-- **Podman** (default) or Docker — see below
+**Local tooling**
+
+| Tool | Version | Check |
+|---|---|---|
+| `gcloud` | any current | `gcloud version` |
+| `terraform` | >= 1.6 | `terraform version` |
+| Python | 3.12 | `python3 --version` |
+| Podman (or Docker) | any | `podman --version` |
+
+**On the GCP project** (`sentinelai-gcp`)
+
+- **Billing enabled.** Not optional — Vertex AI, Cloud Run and Artifact Registry
+  all refuse to enable without a billing account attached, even though actual
+  spend stays near zero. Check: `gcloud billing projects describe sentinelai-gcp`
+- **Your account holds `roles/owner`**, or at minimum Project IAM Admin +
+  Service Account Admin + Service Usage Admin. Terraform creates service
+  accounts and grants roles, which needs more than Editor.
+- **Vertex AI available in your region.** `us-central1` has Gemini 2.5 Flash;
+  verify before changing `region`, because Cloud Run, Firestore and Vertex AI
+  are all pinned to the same one.
+
+**Decisions that are hard to reverse**
+
+- **Firestore location is permanent.** The database is created on first apply
+  and its location cannot be changed afterwards — only deleted and recreated.
+  It follows `var.region`, so get the region right before the first apply.
+- **Project ID is permanent.** `sentinelai-gcp` is already fixed; the state
+  bucket name derives from it (`sentinelai-gcp-tfstate`).
+
+**Optional, and genuinely optional**
+
+- **Slack webhook** — without it, incidents are still triaged, stored and
+  metered; only the notification is skipped. Add it later without redeploying
+  (see [`docs/runbook.md`](docs/runbook.md#rotating-the-slack-webhook)).
+- **GitHub secrets** — only needed for CI deploys. Local `make deploy` works
+  without them.
+- **Billing budget guard** — needs billing-account-level permission, which a
+  personal account may not grant. Off by default (`enable_budget_guard`).
 
 ### 1 · Bootstrap
 
 ```bash
-git clone https://github.com/OWNER/GCP-Project.git && cd GCP-Project
+git clone https://github.com/saran-sharma/SentinelAI-GCP.git && cd SentinelAI-GCP
 gcloud auth login && gcloud auth application-default login
 
 # Creates the versioned state bucket and enables base APIs
-./scripts/bootstrap.sh YOUR_PROJECT_ID us-central1
+./scripts/bootstrap.sh sentinelai-gcp us-central1
 ```
 
 ### 2 · Configure
@@ -213,20 +248,29 @@ gcloud auth login && gcloud auth application-default login
 ```bash
 cd terraform
 cp terraform.tfvars.example terraform.tfvars
-$EDITOR terraform.tfvars          # project_id, github_repository, alert_email
+$EDITOR terraform.tfvars          # set alert_email; the rest is pre-filled
+```
 
-# Keep the webhook out of the file
+`project_id` and `github_repository` already point at `sentinelai-gcp` and
+`saran-sharma/SentinelAI-GCP`. The only value you must supply is `alert_email` —
+where platform-health alerts (AI degraded, dead-letter backlog, service 5xx) are
+delivered. Leave it empty for dashboard-only.
+
+If you have a Slack webhook, pass it via the environment rather than the file,
+so it never lands in git or in a Terraform plan:
+
+```bash
 export TF_VAR_slack_webhook_url="https://hooks.slack.com/services/..."
 ```
 
 ### 3 · Deploy
 
 ```bash
-terraform init -backend-config="bucket=YOUR_PROJECT_ID-tfstate"
+terraform init -backend-config="bucket=sentinelai-gcp-tfstate"
 terraform apply                    # ~4 min; deploys with a placeholder image
 
 # Build and deploy the real image
-cd .. && make deploy PROJECT_ID=YOUR_PROJECT_ID
+cd .. && make deploy PROJECT_ID=sentinelai-gcp
 ```
 
 #### Container engine
@@ -256,7 +300,7 @@ the image is identical either way.
 ### 4 · Verify
 
 ```bash
-make smoke PROJECT_ID=YOUR_PROJECT_ID
+make smoke PROJECT_ID=sentinelai-gcp
 ```
 
 ```
@@ -294,7 +338,7 @@ Add to the repository:
 ## Demo
 
 ```bash
-make demo PROJECT_ID=YOUR_PROJECT_ID
+make demo PROJECT_ID=sentinelai-gcp
 ```
 
 Publishes 45 signals: four distinct failure modes, one piece of deliberate noise,
@@ -457,8 +501,8 @@ make install && make test
 ## Teardown
 
 ```bash
-make destroy PROJECT_ID=YOUR_PROJECT_ID
-gcloud storage rm -r "gs://YOUR_PROJECT_ID-tfstate"   # state bucket is not managed by Terraform
+make destroy PROJECT_ID=sentinelai-gcp
+gcloud storage rm -r "gs://sentinelai-gcp-tfstate"   # state bucket is not managed by Terraform
 ```
 
 ---

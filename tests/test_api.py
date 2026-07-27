@@ -63,6 +63,33 @@ def test_liveness_is_served_on_every_alias(client, path):
     assert response.json() == {"status": "ok"}
 
 
+def test_readiness_probe_id_is_not_a_reserved_firestore_id():
+    """Firestore rejects document ids matching __.*__ with InvalidArgument.
+
+    The original id was "__readiness_probe__", so readiness could never pass:
+    the read reached Firestore — proving credentials, network and IAM were all
+    fine — and was then rejected for the id alone.
+    """
+    import re
+
+    from app.main import READINESS_PROBE_DOC_ID
+
+    assert not re.fullmatch(r"__.*__", READINESS_PROBE_DOC_ID)
+    assert READINESS_PROBE_DOC_ID not in (".", "..")
+    assert "/" not in READINESS_PROBE_DOC_ID
+
+
+def test_readiness_uses_that_id(client, monkeypatch):
+    seen: list[str] = []
+    monkeypatch.setattr(app.state.container.repository, "get", lambda doc_id: seen.append(doc_id))
+
+    client.get("/readyz")
+
+    from app.main import READINESS_PROBE_DOC_ID
+
+    assert seen == [READINESS_PROBE_DOC_ID]
+
+
 def test_readiness_failure_names_its_cause(client, monkeypatch):
     def boom(_fingerprint):
         raise PermissionError("caller lacks roles/datastore.user")

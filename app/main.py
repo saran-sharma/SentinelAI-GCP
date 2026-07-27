@@ -106,6 +106,15 @@ async def request_context(request: Request, call_next):
 
 # --- health ---------------------------------------------------------------
 
+# Firestore reserves document ids matching __.*__, and rejects them with
+# InvalidArgument rather than simply returning "not found". The original probe
+# id was "__readiness_probe__", which meant readiness could never succeed: the
+# request reached Firestore, proving connectivity and IAM were fine, and was
+# then rejected for the id alone. Any non-reserved id works — the point is to
+# perform a real read of a document that does not exist, which is the cheapest
+# operation that still exercises credentials, network and permissions.
+READINESS_PROBE_DOC_ID = "readiness-probe"
+
 
 # Liveness is exposed on three paths deliberately.
 #
@@ -135,7 +144,7 @@ async def readyz(c: Container = Depends(container)) -> Response:
     whole pipeline down for a dependency we can survive losing.
     """
     try:
-        c.repository.get("__readiness_probe__")
+        c.repository.get(READINESS_PROBE_DOC_ID)
     except Exception as exc:  # noqa: BLE001
         # The exception type and text are both needed: "unreachable" could be a
         # missing database, a wrong location, or an IAM denial, and the fix

@@ -355,3 +355,43 @@ gcloud firestore documents delete \
 # Read archived digests
 gcloud storage ls "gs://${PROJECT_ID}-sentinelai-artifacts/digests/**"
 ```
+
+### `/readyz` returns 503 `firestore:unreachable`
+
+Read the `reason` field in the response body — it names the exception type.
+
+| Reason | Cause | Fix |
+|---|---|---|
+| `InvalidArgument: ... id ... is reserved` | The probe document id matches Firestore's reserved `__.*__` pattern | Fixed: the id is now `readiness-probe`. A test guards against reintroducing a reserved id |
+| `NotFound` | No Firestore database in this project, or a different location | `gcloud firestore databases list --project=<PROJECT_ID>` |
+| `PermissionDenied` | Runtime SA missing `roles/datastore.user` | `terraform apply` restores it |
+| `DefaultCredentialsError` | No ADC — should be impossible on Cloud Run | Check the service account is attached to the revision |
+
+Worth noting what the `InvalidArgument` case actually proved: the request
+*reached* Firestore. Credentials, networking and IAM were all working. Only the
+document id was wrong. A readiness probe that fails for a reason unrelated to
+the dependency it is checking is worse than no probe, because it reports the
+dependency as down when it is up.
+
+### `/healthz` returns Google's HTML 404 but `/livez` returns 200
+
+Both are the same handler. If one path is answered by the front end and another
+reaches the container, the interception is upstream and keyed on the path
+string — the application cannot affect it.
+
+Confirm with:
+
+```bash
+make diagnose PROJECT_ID=<PROJECT_ID>
+```
+
+Section 5 requests `/healthz`, `/healthz?cb=<epoch>`, `/livez` and `/_health`
+side by side:
+
+- `?cb=` returns 200, bare does not → a cached response at the edge, keyed on
+  the exact URL. It will age out; use `/livez` meanwhile.
+- all `/healthz` variants 404 while `/livez` is 200 → keyed on the path string.
+
+Either way the fix is the same: use `/livez`. Probes, the smoke test and the
+Cloud Run health checks all point at it. `/healthz` remains registered so
+nothing breaks if the interception clears.

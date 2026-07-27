@@ -5,6 +5,12 @@ PROJECT_ID ?= $(shell gcloud config get-value project 2>/dev/null)
 REGION     ?= us-central1
 TF         := terraform -chdir=terraform
 
+# Container engine. Podman is the default: it needs no daemon and no root, which
+# is usually why a managed corporate machine disallows Docker in the first place.
+# The Dockerfile is plain OCI, so either engine builds it identically.
+# Override with: make build ENGINE=docker
+ENGINE ?= podman
+
 .PHONY: help
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -70,13 +76,21 @@ validate: ## Validate Terraform without credentials
 IMAGE := $(REGION)-docker.pkg.dev/$(PROJECT_ID)/sentinelai/sentinelai-triage
 
 .PHONY: build
-build: ## Build the container image
-	docker build -t $(IMAGE):$(shell git rev-parse --short HEAD) .
+build: ## Build the container image (Podman by default; ENGINE=docker to override)
+	$(ENGINE) build -t $(IMAGE):$(shell git rev-parse --short HEAD) .
+
+.PHONY: login
+login: ## Authenticate the container engine to Artifact Registry
+	@# `gcloud auth configure-docker` installs a docker-credential-gcloud helper
+	@# into ~/.docker/config.json, which Podman does not invoke. Logging in with
+	@# a short-lived OAuth access token works identically for both engines and
+	@# leaves no persistent credential helper behind.
+	gcloud auth print-access-token \
+		| $(ENGINE) login -u oauth2accesstoken --password-stdin https://$(REGION)-docker.pkg.dev
 
 .PHONY: push
-push: build ## Push the image to Artifact Registry
-	gcloud auth configure-docker $(REGION)-docker.pkg.dev --quiet
-	docker push $(IMAGE):$(shell git rev-parse --short HEAD)
+push: build login ## Push the image to Artifact Registry
+	$(ENGINE) push $(IMAGE):$(shell git rev-parse --short HEAD)
 
 .PHONY: deploy
 deploy: push ## Build, push and apply with the new image

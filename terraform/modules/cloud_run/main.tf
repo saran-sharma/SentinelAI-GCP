@@ -123,9 +123,14 @@ resource "google_cloud_run_v2_service" "triage" {
         }
       }
 
+      # /livez, not /healthz. Probes run against the container port and never
+      # traverse the front end, so /healthz would work here — but the deployed
+      # service has /healthz intercepted upstream, and having the probe path
+      # differ from the path an operator can actually curl is how you end up
+      # with a "healthy" service nobody can verify.
       startup_probe {
         http_get {
-          path = "/healthz"
+          path = "/livez"
         }
         initial_delay_seconds = 3
         period_seconds        = 5
@@ -135,7 +140,7 @@ resource "google_cloud_run_v2_service" "triage" {
 
       liveness_probe {
         http_get {
-          path = "/healthz"
+          path = "/livez"
         }
         period_seconds    = 30
         failure_threshold = 3

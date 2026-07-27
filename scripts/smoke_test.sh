@@ -91,7 +91,9 @@ echo "==> Image:  ${RUNNING_IMAGE:-unknown}"
 SIGNAL='{"service":"smoke-test","severity":"ERROR","text":"psycopg2.OperationalError: connection pool exhausted on db-primary"}'
 
 echo "==> Health"
-expect "liveness" GET /healthz 200
+# /livez, not /healthz: the deployed service has /healthz intercepted
+# upstream of the container. Same handler, reachable path.
+expect "liveness" GET /livez 200
 expect "readiness (Firestore reachable)" GET /readyz 200
 
 echo "==> Authentication"

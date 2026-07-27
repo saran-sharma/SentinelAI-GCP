@@ -105,6 +105,15 @@ deploy: push ## Build, push and apply with the new image
 smoke: ## Run post-deploy smoke tests
 	./scripts/smoke_test.sh $(PROJECT_ID) $(REGION)
 
+.PHONY: diagram
+diagram: ## Regenerate the architecture diagram (SVG + PNG)
+	python3 scripts/render_architecture.py
+	@python3 -c "import cairosvg" 2>/dev/null && python3 -c "\
+import cairosvg; cairosvg.svg2png(url='docs/images/architecture.svg', \
+write_to='docs/images/architecture.png', output_width=2560, output_height=1440, \
+background_color='white'); print('wrote docs/images/architecture.png')" \
+|| echo "  (pip install cairosvg to also emit the PNG)"
+
 .PHONY: diagnose
 diagnose: ## Dump full deployment evidence (run this when smoke fails)
 	./scripts/diagnose.sh $(PROJECT_ID) $(REGION)

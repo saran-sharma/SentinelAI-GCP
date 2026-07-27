@@ -111,6 +111,28 @@ def test_manual_analyze_rejects_empty_signal(client):
     assert client.post("/v1/analyze", json={"service": "ledger", "text": "  "}).status_code == 400
 
 
+@pytest.mark.parametrize("body", [200, "a string", [1, 2, 3], True])
+def test_manual_analyze_rejects_non_object_bodies(client, body):
+    """A scalar body used to raise TypeError deep in the handler and 500."""
+    response = client.post("/v1/analyze", json=body)
+
+    assert response.status_code == 400
+    assert "JSON object" in response.json()["detail"]
+
+
+def test_manual_analyze_rejects_an_empty_body(client):
+    # httpx sends no body at all for json=None, so this takes the parse path.
+    response = client.post("/v1/analyze", json=None)
+
+    assert response.status_code == 400
+    assert "JSON" in response.json()["detail"]
+
+
+def test_manual_analyze_rejects_malformed_json(client):
+    response = client.post("/v1/analyze", content=b"{not json", headers={"content-type": "application/json"})
+    assert response.status_code == 400
+
+
 def test_list_incidents_clamps_the_window(client):
     client.post("/v1/events/pubsub", json=push_body(LOG_ENTRY))
 

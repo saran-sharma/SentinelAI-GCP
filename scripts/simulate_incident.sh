@@ -14,6 +14,11 @@ PROJECT_ID="${1:?usage: simulate_incident.sh <PROJECT_ID> [BURST_SIZE]}"
 BURST="${2:-40}"
 TOPIC="sentinelai-events"
 
+# gcloud emits CRLF on Windows and $(...) keeps the carriage return, which
+# turns a bearer token into a malformed header and a URL into an unroutable
+# one. Strip it from every capture.
+gc() { gcloud "$@" | tr -d '\r'; }
+
 publish() {
   gcloud pubsub topics publish "${TOPIC}" \
     --project="${PROJECT_ID}" \
@@ -57,11 +62,18 @@ done
 echo "==> 4/4 Waiting 30s for push delivery and triage"
 sleep 30
 
-SERVICE_URL="$(gcloud run services describe sentinelai-triage \
+SERVICE_URL="$(gc run services describe sentinelai-triage \
   --project="${PROJECT_ID}" --region="${REGION:-us-central1}" \
   --format='value(status.url)')"
 
-cat >/tmp/sentinel_report.py <<'PYTHON'
+if [ -z "${SERVICE_URL}" ]; then
+  echo "  Could not resolve the service URL — is sentinelai-triage deployed?" >&2
+  exit 1
+fi
+
+REPORT_SCRIPT="$(mktemp -t sentinel_report.XXXXXX.py)"
+trap 'rm -f "${REPORT_SCRIPT}"' EXIT
+cat >"${REPORT_SCRIPT}" <<'PYTHON'
 import json
 import sys
 
@@ -85,9 +97,21 @@ PYTHON
 
 echo
 echo "==> Incidents recorded in the last hour:"
-curl -sS "${SERVICE_URL}/v1/incidents?hours=1" \
-  -H "Authorization: Bearer $(gcloud auth print-identity-token)" |
-  python3 /tmp/sentinel_report.py
+
+TOKEN="$(gc auth print-identity-token)"
+RESPONSE="$(curl -sS -w $'\n%{http_code}' "${SERVICE_URL}/v1/incidents?hours=1" \
+  -H "Authorization: Bearer ${TOKEN}" 2>&1 || true)"
+STATUS="${RESPONSE##*$'\n'}"
+BODY="${RESPONSE%$'\n'*}"
+
+if [ "${STATUS}" != "200" ]; then
+  echo "  Could not read incidents: HTTP ${STATUS:-<none>}" >&2
+  echo "  ${BODY}" >&2
+  [ "${STATUS}" = "403" ] && echo "  Grant yourself invoker: operator_members = [\"user:...\"]" >&2
+  exit 1
+fi
+
+printf '%s' "${BODY}" | python3 "${REPORT_SCRIPT}"
 
 echo
 echo "==> Gemini was invoked once per distinct failure mode, not once per signal."

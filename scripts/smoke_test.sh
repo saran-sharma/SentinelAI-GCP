@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # Post-deploy verification. Exits non-zero on the first failed check so it can
-# gate a release.
+# gate a release, and prints the actual HTTP status and response body when
+# something fails — a check that only says "FAIL" tells you nothing.
 #
 # Usage: ./scripts/smoke_test.sh <PROJECT_ID> [REGION]
 
@@ -10,9 +11,20 @@ set -euo pipefail
 PROJECT_ID="${1:?usage: smoke_test.sh <PROJECT_ID> [REGION]}"
 REGION="${2:-us-central1}"
 
-URL="$(gcloud run services describe sentinelai-triage \
+# gcloud emits CRLF on Windows, and $(...) strips the trailing newline but not
+# the carriage return. An unstripped \r turns a bearer token into a malformed
+# header and a URL into an unroutable one, which presents as an auth failure
+# with no obvious cause. Strip it from every gcloud capture in this file.
+gc() { gcloud "$@" | tr -d '\r'; }
+
+URL="$(gc run services describe sentinelai-triage \
   --project="${PROJECT_ID}" --region="${REGION}" --format='value(status.url)')"
-TOKEN="$(gcloud auth print-identity-token)"
+TOKEN="$(gc auth print-identity-token)"
+
+if [ -z "${URL}" ]; then
+  echo "  FAIL  could not resolve the service URL — is sentinelai-triage deployed in ${REGION}?"
+  exit 1
+fi
 
 pass() { echo "  PASS  $1"; }
 fail() {
@@ -20,24 +32,37 @@ fail() {
   exit 1
 }
 
-check() {
-  # check <description> <command...>
-  local description="$1"
-  shift
-  if "$@" >/dev/null 2>&1; then
-    pass "${description}"
-  else
-    fail "${description}"
+# request <METHOD> <PATH> [DATA] -> sets HTTP_STATUS and HTTP_BODY
+request() {
+  local method="$1" path="$2" data="${3:-}"
+  local raw
+  local -a args=(-sS -X "${method}" -w $'\n%{http_code}' -H "Authorization: Bearer ${TOKEN}")
+  if [ -n "${data}" ]; then
+    args+=(-H "Content-Type: application/json" -d "${data}")
   fi
+
+  raw="$(curl "${args[@]}" "${URL}${path}" 2>&1 || true)"
+  HTTP_STATUS="${raw##*$'\n'}"
+  HTTP_BODY="${raw%$'\n'*}"
 }
 
-SIGNAL='{"service":"smoke-test","severity":"ERROR","text":"psycopg2.OperationalError: connection pool exhausted on db-primary"}'
-
-triage() {
-  curl -sS -f -X POST "${URL}/v1/analyze" \
-    -H "Authorization: Bearer ${TOKEN}" \
-    -H "Content-Type: application/json" \
-    -d "${SIGNAL}"
+expect() {
+  local description="$1" method="$2" path="$3" want="$4" data="${5:-}"
+  request "${method}" "${path}" "${data}"
+  if [ "${HTTP_STATUS}" = "${want}" ]; then
+    pass "${description} (HTTP ${HTTP_STATUS})"
+  else
+    echo "  FAIL  ${description}"
+    echo "        expected HTTP ${want}, got ${HTTP_STATUS:-<none>}"
+    echo "        response: ${HTTP_BODY}"
+    if [ "${HTTP_STATUS}" = "403" ]; then
+      echo
+      echo "        403 means Cloud Run rejected the caller before the app saw it."
+      echo "        Grant yourself invoker access in terraform.tfvars:"
+      echo "          operator_members = [\"user:\$(gcloud config get-value account)\"]"
+    fi
+    exit 1
+  fi
 }
 
 echo "==> Target: ${URL}"
@@ -46,7 +71,7 @@ echo "==> Target: ${URL}"
 # sample "hello" container so the very first apply succeeds before any image
 # exists. That container 404s on every path except "/", which looks exactly
 # like a broken application. Catch it here rather than letting it waste an hour.
-RUNNING_IMAGE="$(gcloud run services describe sentinelai-triage \
+RUNNING_IMAGE="$(gc run services describe sentinelai-triage \
   --project="${PROJECT_ID}" --region="${REGION}" \
   --format='value(spec.template.spec.containers[0].image)' 2>/dev/null || true)"
 
@@ -63,38 +88,35 @@ case "${RUNNING_IMAGE}" in
 esac
 echo "==> Image:  ${RUNNING_IMAGE:-unknown}"
 
+SIGNAL='{"service":"smoke-test","severity":"ERROR","text":"psycopg2.OperationalError: connection pool exhausted on db-primary"}'
+
 echo "==> Health"
-check "liveness" curl -sS -f "${URL}/healthz" -H "Authorization: Bearer ${TOKEN}"
-check "readiness (Firestore reachable)" curl -sS -f "${URL}/readyz" -H "Authorization: Bearer ${TOKEN}"
+expect "liveness" GET /healthz 200
+expect "readiness (Firestore reachable)" GET /readyz 200
 
 echo "==> Authentication"
 # Unauthenticated calls must be rejected by Cloud Run IAM before reaching the app.
-CODE="$(curl -sS -o /dev/null -w '%{http_code}' "${URL}/v1/incidents")"
+CODE="$(curl -sS -o /dev/null -w '%{http_code}' "${URL}/v1/incidents" || true)"
 case "${CODE}" in
-401 | 403) pass "unauthenticated request rejected (${CODE})" ;;
+401 | 403) pass "unauthenticated request rejected (HTTP ${CODE})" ;;
 *) fail "endpoint is publicly reachable (HTTP ${CODE})" ;;
 esac
 
 echo "==> Triage"
-RESPONSE="$(triage)"
-case "${RESPONSE}" in
-*'"fingerprint"'*) pass "triage returned a verdict" ;;
-*) fail "no verdict: ${RESPONSE}" ;;
-esac
-
-FINGERPRINT="$(printf '%s' "${RESPONSE}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["fingerprint"])')"
+expect "triage returned a verdict" POST /v1/analyze 200 "${SIGNAL}"
+FINGERPRINT="$(printf '%s' "${HTTP_BODY}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["fingerprint"])')"
 
 echo "==> Deduplication"
-SECOND="$(triage)"
+expect "repeat signal accepted" POST /v1/analyze 200 "${SIGNAL}"
 
-case "${SECOND}" in
+case "${HTTP_BODY}" in
 *'"action":"suppressed"'*) pass "repeat signal suppressed (${FINGERPRINT})" ;;
-*) fail "duplicate was not suppressed: ${SECOND}" ;;
+*) fail "duplicate was not suppressed: ${HTTP_BODY}" ;;
 esac
 
-case "${SECOND}" in
+case "${HTTP_BODY}" in
 *'"ai_invoked":false'*) pass "no second Gemini call" ;;
-*) fail "Gemini was called again for a duplicate" ;;
+*) fail "Gemini was called again for a duplicate: ${HTTP_BODY}" ;;
 esac
 
 echo

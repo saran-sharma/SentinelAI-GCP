@@ -107,7 +107,21 @@ async def request_context(request: Request, call_next):
 # --- health ---------------------------------------------------------------
 
 
+# Liveness is exposed on three paths deliberately.
+#
+# `/healthz` on this deployment returns Google's HTML 404 from upstream of the
+# container — authenticated and unauthenticated alike, with no matching row in
+# the Cloud Run request log — while `/readyz` and `/docs` reach the app over the
+# same host with the same token. Whatever is intercepting it is keyed on the
+# path and survives new revisions, so the application cannot fix it; it can only
+# stop depending on that one path being reachable.
+#
+# `/livez` is the alias to prefer. `/_health` is a second, differently-shaped
+# fallback in case the interception matches a `*health*` pattern rather than the
+# exact string.
 @app.get("/healthz", include_in_schema=False)
+@app.get("/livez", include_in_schema=False)
+@app.get("/_health", include_in_schema=False)
 async def healthz() -> Response:
     return JSONResponse({"status": "ok"})
 
@@ -123,8 +137,15 @@ async def readyz(c: Container = Depends(container)) -> Response:
     try:
         c.repository.get("__readiness_probe__")
     except Exception as exc:  # noqa: BLE001
-        logger.error("readiness_failed", extra={"error": str(exc)})
-        return JSONResponse({"status": "degraded", "firestore": "unreachable"}, status_code=503)
+        # The exception type and text are both needed: "unreachable" could be a
+        # missing database, a wrong location, or an IAM denial, and the fix
+        # differs for each. Returning it costs nothing on a private service.
+        reason = f"{type(exc).__name__}: {exc}"
+        logger.error("readiness_failed", extra={"error": reason})
+        return JSONResponse(
+            {"status": "degraded", "firestore": "unreachable", "reason": reason},
+            status_code=503,
+        )
     return JSONResponse({"status": "ready"})
 
 

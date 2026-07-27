@@ -91,8 +91,15 @@ echo "  audience: $(printf '%s' "${TOKEN}" | cut -d. -f2 \
 
 # --- 5. Who answers, authenticated ------------------------------------------
 
-rule "5. Authenticated requests (same host, three paths)"
-for path in /healthz /readyz /docs; do
+rule "5. Authenticated requests (same host, several paths)"
+# /livez and /_health are aliases for the same handler as /healthz. If they
+# return 200 while /healthz does not, the interception is keyed on the path
+# string and the application is provably fine.
+#
+# /healthz?cb=<epoch> is the cache-bust probe: same path, different URL. If it
+# returns 200 while bare /healthz does not, the 404 is a cached response held
+# at the edge — which is what would make it survive new revisions.
+for path in /healthz "/healthz?cb=$(date +%s)" /livez /_health /readyz /docs; do
   code="$(curl -sS -o /tmp/diag_body.txt -w '%{http_code}' \
     -H "Authorization: Bearer ${TOKEN}" "${URL}${path}")"
   ctype="$(curl -sS -o /dev/null -D - -H "Authorization: Bearer ${TOKEN}" "${URL}${path}" \
@@ -103,11 +110,14 @@ done
 
 echo
 echo "  Interpretation:"
-echo "    All three 200            -> the platform is fine; earlier failures were client-side."
-echo "    All three HTML 403/404   -> rejected at the GFE. The app is never reached."
-echo "    /docs 200, /healthz HTML -> impossible on one host with one token; the two"
-echo "                                requests were not sent the same way. Re-run both here."
-echo "    JSON {\"detail\":...}      -> the response IS from FastAPI, so routing is fine."
+echo "    Everything 200 / JSON     -> the platform is fine; failures were client-side."
+echo "    Everything HTML 403/404   -> rejected upstream. The app is never reached."
+echo "    /healthz?cb=... is 200    -> the bare-URL 404 is CACHED at the edge. It is keyed"
+echo "                                 on the exact URL, which is why new revisions do not"
+echo "                                 clear it. Use /livez and let the entry expire."
+echo "    /livez 200, /healthz 404  -> interception keyed on the path string itself."
+echo "                                 The application is provably correct; switch paths."
+echo "    JSON {\"detail\":...}       -> the response IS from FastAPI; routing is fine."
 
 # --- 6. Did the request reach the container? --------------------------------
 #
@@ -154,6 +164,31 @@ gc logging read \
 
 echo
 echo "  'service_started' present = the app booted and its routes are registered."
+echo "  Note: the request middleware skips /healthz and /readyz, so their absence"
+echo "  from this list is expected and proves nothing either way."
+
+# --- 9. Why readiness is failing --------------------------------------------
+#
+# A 503 from /readyz is the application answering, not the platform. The
+# swallowed exception text is the only thing that distinguishes a missing
+# database from a wrong location from an IAM denial.
+
+rule "9. Readiness failure reason"
+gc logging read \
+  "resource.type=\"cloud_run_revision\"
+   AND resource.labels.service_name=\"${SERVICE}\"
+   AND jsonPayload.message=\"readiness_failed\"" \
+  --project="${PROJECT_ID}" --limit=3 --freshness=30m \
+  --format='value(jsonPayload.error)' 2>/dev/null || echo "  (none)"
+
+echo
+echo "  NotFound / 404          -> the Firestore database does not exist in this project,"
+echo "                             or was created in a different location."
+echo "  PermissionDenied / 403  -> the runtime SA is missing roles/datastore.user."
+echo "  DefaultCredentialsError -> no ADC; should be impossible on Cloud Run."
+echo
+echo "  Check the database exists and note its location:"
+echo "      gcloud firestore databases list --project=${PROJECT_ID}"
 
 rule "Done"
 echo "Attach this entire output when reporting the problem."

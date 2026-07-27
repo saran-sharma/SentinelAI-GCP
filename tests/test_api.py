@@ -53,8 +53,28 @@ LOG_ENTRY = {
 }
 
 
-def test_healthz(client):
-    assert client.get("/healthz").status_code == 200
+@pytest.mark.parametrize("path", ["/healthz", "/livez", "/_health"])
+def test_liveness_is_served_on_every_alias(client, path):
+    """/healthz is intercepted upstream on the deployed service, so probes and
+    smoke tests must have a working alternative that shares the same handler."""
+    response = client.get(path)
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+def test_readiness_failure_names_its_cause(client, monkeypatch):
+    def boom(_fingerprint):
+        raise PermissionError("caller lacks roles/datastore.user")
+
+    monkeypatch.setattr(app.state.container.repository, "get", boom)
+
+    response = client.get("/readyz")
+
+    assert response.status_code == 503
+    # "unreachable" alone cannot distinguish a missing database from an IAM denial.
+    assert "PermissionError" in response.json()["reason"]
+    assert "datastore.user" in response.json()["reason"]
 
 
 def test_pubsub_push_triages_a_log_entry(client):

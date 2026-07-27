@@ -186,7 +186,20 @@ async def analyze(
     `make smoke` / `make demo`, which is the entire point of the endpoint.
     """
     verify_oidc_token(request, settings)
-    body: dict[str, Any] = await request.json()
+
+    # A scalar or malformed body must be a 400, not a 500. `"message" in body`
+    # against a non-mapping raises TypeError, which surfaced as an opaque
+    # Internal Server Error and told the caller nothing about what was wrong.
+    try:
+        body: Any = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "body must be valid JSON") from exc
+
+    if not isinstance(body, dict):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"body must be a JSON object, got {type(body).__name__}",
+        )
 
     if "message" in body and isinstance(body["message"], dict):
         payload, attributes, _ = decode_pubsub_push(body)

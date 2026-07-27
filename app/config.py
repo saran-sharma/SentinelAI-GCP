@@ -51,8 +51,14 @@ class Settings(BaseSettings):
     # app/auth.py for why the audience is not pinned here by default.
     verify_oidc: bool = True
 
-    # Only set when running somewhere other than Cloud Run, which validates the
-    # audience against the service URL before forwarding the request.
+    # Cloud Run verifies the token signature, expiry and audience before the
+    # request reaches this process, so re-verifying here buys no security and
+    # costs a network call per request that can fail on its own. Enable this
+    # only when running somewhere with no authenticating proxy in front.
+    verify_token_signature: bool = False
+
+    # Only meaningful when verify_token_signature is true; Cloud Run already
+    # validates the audience against the service URL.
     expected_audience: str = ""
 
     # Machine endpoints are pinned to exactly one service account each. Operator
